@@ -1,0 +1,6 @@
+{
+  "name": "SISTPRO - Analista de Apostas",
+  "description": "SIST-Pro Analiser - Sistema profissional de análise esportiva para Futebol e Basquete.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
