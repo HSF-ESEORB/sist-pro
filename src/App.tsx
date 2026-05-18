@@ -26,9 +26,14 @@ import {
   FileText,
   Table as TableIcon,
   Image as ImageIcon,
-  ChevronDown
+  ChevronDown,
+  LogOut,
+  LogIn,
+  User as UserIcon
 } from "lucide-react";
 import { Match, Analysis, fetchDailyMatches, analyzeMatch } from "./services/geminiService";
+import { useAuth } from './components/FirebaseProvider';
+import { loginWithGoogle, logout } from './lib/firebase';
 import { cn } from "./lib/utils";
 import ReactMarkdown from "react-markdown";
 import html2canvas from "html2canvas";
@@ -39,6 +44,7 @@ type Step = "LIST" | "ANALYSIS";
 
 export default function App() {
   const [currentStep, setCurrentStep] = useState<Step>("LIST");
+  const { user, loading: authLoading } = useAuth();
   const [matches, setMatches] = useState<Match[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
@@ -480,6 +486,43 @@ export default function App() {
           </div>
         </div>
       </header>
+      
+      {/* Auth Bar */}
+      {!authLoading && (
+        <div className="bg-gray-100 border-b border-gray-200 py-2">
+          <div className="max-w-7xl mx-auto px-4 flex justify-end items-center gap-4">
+            {user ? (
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 text-sm text-gray-600">
+                  <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-[10px] uppercase font-bold overflow-hidden">
+                    {user.photoURL ? (
+                      <img src={user.photoURL} alt={user.displayName || ''} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                    ) : (
+                      <UserIcon size={12} />
+                    )}
+                  </div>
+                  <span className="font-medium hidden sm:inline">{user.displayName || user.email}</span>
+                </div>
+                <button 
+                  onClick={() => logout()}
+                  className="flex items-center gap-1 text-xs text-red-500 hover:text-red-700 font-semibold"
+                >
+                  <LogOut size={12} />
+                  Sair
+                </button>
+              </div>
+            ) : (
+              <button 
+                onClick={() => loginWithGoogle()}
+                className="flex items-center gap-2 bg-white border border-gray-300 px-3 py-1 rounded-full text-xs font-semibold text-gray-700 hover:bg-gray-50 transition-colors shadow-sm"
+              >
+                <LogIn size={12} className="text-blue-600" />
+                Entrar com Google
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       <main className="max-w-7xl mx-auto px-4 py-8">
         {/* Error Notification */}

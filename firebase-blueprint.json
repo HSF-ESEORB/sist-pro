@@ -1,0 +1,73 @@
+{
+  "entities": {
+    "Match": {
+      "title": "Match",
+      "description": "Details of a sports match",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "homeTeam": { "type": "string" },
+        "awayTeam": { "type": "string" },
+        "league": { "type": "string" },
+        "time": { "type": "string" },
+        "date": { "type": "string" },
+        "source": { "type": "string" },
+        "sport": { "type": "string" },
+        "isHighlight": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["homeTeam", "awayTeam", "league", "time", "date", "sport"]
+    },
+    "Analysis": {
+      "title": "Analysis",
+      "description": "Expert analysis for a match",
+      "type": "object",
+      "properties": {
+        "matchId": { "type": "string" },
+        "recentForm": { "type": "string" },
+        "h2h": { "type": "string" },
+        "homeAway": { "type": "string" },
+        "lineups": { "type": "string" },
+        "stats": { "type": "string" },
+        "odds": { "type": "string" },
+        "prediction": {
+          "type": "object",
+          "properties": {
+            "market": { "type": "string" },
+            "probability": { "type": "number" },
+            "confidence": { "type": "string", "enum": ["Baixo", "Médio", "Alto"] }
+          }
+        },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["matchId", "prediction"]
+    },
+    "User": {
+      "title": "User",
+      "description": "User profile",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    }
+  },
+  "firestore": {
+    "/matches/{matchId}": {
+      "schema": "Match",
+      "description": "Collection of sports matches cached globally"
+    },
+    "/analyses/{analysisId}": {
+      "schema": "Analysis",
+      "description": "Collection of match analyses cached globally"
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    }
+  }
+}

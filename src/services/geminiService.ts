@@ -1,6 +1,69 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { db, auth } from '../lib/firebase';
+import { 
+  collection, 
+  doc, 
+  setDoc, 
+  getDoc, 
+  query, 
+  where, 
+  getDocs, 
+  Timestamp,
+  serverTimestamp 
+} from 'firebase/firestore';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+// Helper to call our server-side API proxy
+async function callProxy(prompt: string, useSearch: boolean) {
+  const response = await fetch("/api/ai/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt, useSearch })
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || `HTTP error! status: ${response.status}`);
+  }
+
+  return data;
+}
+
+// Error Handling as required by Firebase skill
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 // Cache configuration
 const CACHE_EXPIRATION_MS = 4 * 60 * 60 * 1000; // 4 hours for matches
@@ -66,19 +129,30 @@ export interface Analysis {
 }
 
 export async function fetchDailyMatches(date: string): Promise<Match[]> {
-  // 1. Check Cache
-  const cacheKey = `matches_cache_${date}`;
+  // 1. Check Firestore Cache
+  const path = 'matches';
   try {
-    const cachedData = localStorage.getItem(cacheKey);
-    if (cachedData) {
-      const { data, timestamp } = JSON.parse(cachedData);
-      if (Date.now() - timestamp < CACHE_EXPIRATION_MS) {
-        console.log("Usando jogos em cache para:", date);
-        return data;
+    const q = query(collection(db, path), where("date_iso", "==", date));
+    const querySnapshot = await getDocs(q);
+    if (!querySnapshot.empty) {
+      const results: Match[] = [];
+      querySnapshot.forEach((doc) => {
+        const data = doc.data();
+        // Check timestamp (createdAt)
+        const createdAt = data.createdAt;
+        if (createdAt && (Date.now() - (createdAt as Timestamp).toMillis() < CACHE_EXPIRATION_MS)) {
+          results.push({ ...data, id: doc.id } as Match);
+        }
+      });
+      
+      if (results.length >= 10) { // If we have a decent amount of cached matches
+        console.log(`Usando ${results.length} jogos em cache do Firestore para:`, date);
+        return results;
       }
     }
   } catch (e) {
-    console.warn("Erro ao ler cache de jogos:", e);
+    console.warn("Erro ao ler Firestore para jogos:", e);
+    // Fallthrough to AI if Firestore fails or is empty
   }
 
   const prompt = `Você é um Analista Esportivo Profissional e Investigador de Dados.
@@ -110,62 +184,12 @@ Retorne APENAS um array JSON seguindo estritamente este esquema:
   }
 ]`;
 
-  const callAi = async (useSearch: boolean) => {
-    try {
-      console.log(`Chamando Gemini (${useSearch ? 'com' : 'sem'} busca) para o dia: ${date}`);
-      
-      return await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: [{ parts: [{ text: prompt }] }],
-        config: {
-          tools: useSearch ? [{ googleSearch: {} }] : [],
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                homeTeam: { type: Type.STRING },
-                awayTeam: { type: Type.STRING },
-                league: { type: Type.STRING },
-                time: { type: Type.STRING },
-                date: { type: Type.STRING },
-                source: { type: Type.STRING },
-                sport: { 
-                  type: Type.STRING, 
-                  description: 'Modalidade esportiva',
-                  enum: ["Futebol", "Basquete"] 
-                },
-                isHighlight: { type: Type.BOOLEAN },
-              },
-              required: ["homeTeam", "awayTeam", "league", "time", "date", "source", "sport", "isHighlight"],
-            },
-          },
-        }
-      });
-    } catch (err: any) {
-      console.warn(`Erro na tentativa de chamada AI (Search=${useSearch}):`, err.message);
-      throw err;
-    }
-  };
-
   try {
     let response: any;
     
     // Use retry logic for the entire operation
     await withRetry(async () => {
-      try {
-        // First attempt with search
-        response = await callAi(true);
-      } catch (searchError: any) {
-        const isQuotaError = searchError.message?.includes("429") || searchError.message?.includes("quota") || searchError.message?.includes("RESOURCE_EXHAUSTED");
-        if (isQuotaError) {
-          throw searchError; // Pass to withRetry for backoff
-        }
-        console.warn("Busca falhou, tentando sem busca:", searchError.message);
-        // Fallback without search
-        response = await callAi(false);
-      }
+      response = await callProxy(prompt, true);
     });
 
     if (!response || !response.text) {
@@ -182,18 +206,22 @@ Retorne APENAS um array JSON seguindo estritamente este esquema:
     const results = data.map((m: any) => {
       // Create a deterministic ID based on the teams and league to help with stable caching
       const cleanName = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-      const id = `${m.sport}-${cleanName(m.homeTeam)}-${cleanName(m.awayTeam)}-${cleanName(m.league)}`.substring(0, 100);
-      return { ...m, id };
+      const id = `${m.sport}-${cleanName(m.homeTeam)}-${cleanName(m.awayTeam)}-${cleanName(m.league)}-${date}`.substring(0, 100);
+      return { ...m, id, date_iso: date };
     });
 
-    // Save to Cache
-    try {
-      localStorage.setItem(cacheKey, JSON.stringify({
-        data: results,
-        timestamp: Date.now()
-      }));
-    } catch (e) {
-      console.warn("Falha ao salvar cache no localStorage:", e);
+    // Save to Firestore Cache (if authenticated and verified)
+    if (auth.currentUser?.emailVerified) {
+      try {
+        for (const match of results) {
+          await setDoc(doc(db, 'matches', match.id), {
+            ...match,
+            createdAt: serverTimestamp()
+          });
+        }
+      } catch (e) {
+        console.warn("Falha ao salvar jogos no Firestore:", e);
+      }
     }
 
     return results;
@@ -205,19 +233,21 @@ Retorne APENAS um array JSON seguindo estritamente este esquema:
 
 export async function analyzeMatch(match: Match): Promise<Analysis> {
   const dateStr = new Date().toISOString().split('T')[0];
-  const cacheKey = `analysis_v1_${match.homeTeam}_${match.awayTeam}_${dateStr}`.replace(/\s+/g, '_');
+  const analysisId = `analysis_${match.id}_${dateStr}`.replace(/\s+/g, '_');
   
+  // 1. Check Firestore Cache
   try {
-    const cachedData = localStorage.getItem(cacheKey);
-    if (cachedData) {
-      const { data, timestamp } = JSON.parse(cachedData);
-      if (Date.now() - timestamp < ANALYSIS_CACHE_EXPIRATION_MS) {
-        console.log(`Usando análise em cache para: ${match.homeTeam} x ${match.awayTeam}`);
+    const analysisDoc = await getDoc(doc(db, 'analyses', analysisId));
+    if (analysisDoc.exists()) {
+      const data = analysisDoc.data();
+      const createdAt = data.createdAt;
+      if (createdAt && (Date.now() - (createdAt as Timestamp).toMillis() < ANALYSIS_CACHE_EXPIRATION_MS)) {
+        console.log(`Usando análise em cache do Firestore para: ${match.homeTeam} x ${match.awayTeam}`);
         return data as Analysis;
       }
     }
   } catch (e) {
-    console.warn("Erro ao ler cache de análise:", e);
+    console.warn("Erro ao ler Firestore para análise:", e);
   }
 
   const prompt = `Analise PROFISSIONAL para o jogo de HOJE (Data de referência: ${new Date().toISOString().split('T')[0]}, Jogo: ${match.homeTeam} x ${match.awayTeam}):
@@ -237,57 +267,11 @@ Regras:
 
 Retorne APENAS o JSON.`;
 
-  const callAnalyze = async (useSearch: boolean) => {
-    try {
-      return await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: [{ parts: [{ text: prompt }] }],
-        config: {
-          tools: useSearch ? [{ googleSearch: {} }] : [],
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              recentForm: { type: Type.STRING },
-              h2h: { type: Type.STRING },
-              homeAway: { type: Type.STRING },
-              lineups: { type: Type.STRING },
-              stats: { type: Type.STRING },
-              odds: { type: Type.STRING },
-              prediction: {
-                type: Type.OBJECT,
-                properties: {
-                  market: { type: Type.STRING },
-                  probability: { type: Type.NUMBER },
-                  confidence: { type: Type.STRING, enum: ["Baixo", "Médio", "Alto"] },
-                },
-                required: ["market", "probability", "confidence"],
-              },
-            },
-            required: ["recentForm", "h2h", "homeAway", "lineups", "stats", "odds", "prediction"],
-          },
-        }
-      });
-    } catch (err: any) {
-      console.warn(`Erro na análise (Search=${useSearch}):`, err.message);
-      throw err;
-    }
-  };
-
   try {
     let response: any;
     
     await withRetry(async () => {
-      try {
-        response = await callAnalyze(true);
-      } catch (searchError: any) {
-        const isQuotaError = searchError.message?.includes("429") || searchError.message?.includes("quota") || searchError.message?.includes("RESOURCE_EXHAUSTED");
-        if (isQuotaError) {
-          throw searchError; // Pass to withRetry for backoff
-        }
-        console.warn("Busca na análise falhou, tentando sem busca.");
-        response = await callAnalyze(false);
-      }
+      response = await callProxy(prompt, true);
     });
 
     if (!response || !response.text) {
@@ -296,14 +280,17 @@ Retorne APENAS o JSON.`;
     
     const analysis = JSON.parse(response.text.trim());
 
-    // Save to Cache
-    try {
-      localStorage.setItem(cacheKey, JSON.stringify({
-        data: analysis,
-        timestamp: Date.now()
-      }));
-    } catch (e) {
-      console.warn("Falha ao salvar cache de análise:", e);
+    // Save to Firestore Cache (if authenticated and verified)
+    if (auth.currentUser?.emailVerified) {
+      try {
+        await setDoc(doc(db, 'analyses', analysisId), {
+          ...analysis,
+          matchId: match.id,
+          createdAt: serverTimestamp()
+        });
+      } catch (e) {
+        console.warn("Falha ao salvar análise no Firestore:", e);
+      }
     }
 
     return analysis;

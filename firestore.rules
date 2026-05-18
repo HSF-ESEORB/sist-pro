@@ -1,0 +1,80 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isEmailVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // 3. Entity Validations
+    function isValidMatch(data) {
+      return data.keys().hasAll(['homeTeam', 'awayTeam', 'league', 'time', 'date', 'sport', 'isHighlight'])
+        && data.homeTeam is string && data.homeTeam.size() <= 100
+        && data.awayTeam is string && data.awayTeam.size() <= 100
+        && data.league is string && data.league.size() <= 100
+        && data.time is string && data.time.size() <= 10
+        && data.date is string && data.date.size() <= 20
+        && data.sport in ['Futebol', 'Basquete']
+        && data.isHighlight is bool;
+    }
+
+    function isValidAnalysis(data) {
+      return data.keys().hasAll(['matchId', 'prediction'])
+        && data.matchId is string && data.matchId.size() <= 128
+        && data.prediction.market is string && data.prediction.market.size() <= 100
+        && data.prediction.probability is number && data.prediction.probability >= 0 && data.prediction.probability <= 100
+        && data.prediction.confidence in ['Baixo', 'Médio', 'Alto'];
+    }
+
+    function isValidUser(data) {
+      return data.uid == request.auth.uid
+        && data.email == request.auth.token.email
+        && data.email is string && data.email.size() <= 256;
+    }
+
+    // 4. Match Rules
+    match /matches/{matchId} {
+      allow read: if isSignedIn();
+      allow create: if isEmailVerified() && isValidId(matchId) && isValidMatch(incoming());
+      // Matches are immutable to maintain cache integrity
+      allow update, delete: if false;
+    }
+
+    // 5. Analysis Rules
+    match /analyses/{analysisId} {
+      allow read: if isSignedIn();
+      allow create: if isEmailVerified() && isValidId(analysisId) && isValidAnalysis(incoming());
+      // Analyses are immutable per date
+      allow update, delete: if false;
+    }
+
+    // 6. User Rules
+    match /users/{userId} {
+      allow read: if isSignedIn() && (userId == request.auth.uid);
+      allow create: if isEmailVerified() && userId == request.auth.uid && isValidUser(incoming());
+      allow update: if isEmailVerified() && userId == request.auth.uid && isValidUser(incoming());
+      allow delete: if false;
+    }
+  }
+}
